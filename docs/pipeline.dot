@@ -1,0 +1,65 @@
+digraph disunity {
+    rankdir=TB;
+    bgcolor="#FAFAF8";
+    pad=0.4;
+    nodesep=0.5;
+    ranksep=0.55;
+    splines=ortho;
+
+    graph [fontname="Georgia", fontsize=11];
+    node  [fontname="Georgia", fontsize=10, shape=box, style="filled",
+           fillcolor="#FFFFFF", color="#DDDDDD", penwidth=0.8,
+           width=2.8, height=0.5, margin="0.15,0.08"];
+    edge  [fontname="Georgia", fontsize=8, color="#999999",
+           arrowsize=0.5, penwidth=0.7];
+
+    // Inputs
+    libil2cpp [label="libil2cpp.so", fillcolor="#F0EDE6", color="#C4B99A"];
+    metadata  [label="global-metadata.dat", fillcolor="#F0EDE6", color="#C4B99A"];
+
+    // Stage nodes
+    parse     [label="Parse metadata                                    11 ms\nv24, v27, v29, v31 (auto-detect)"];
+    decrypt   [label="Detect encryption\nreport magic, attempt XOR recovery (experimental)",
+               style="filled,dashed", color="#C4A265", fillcolor="#FDF8EE",
+               fontcolor="#8B6914"];
+    binary    [label="Binary analysis                                 566 ms\nCodeRegistration, MetadataRegistration, RGCTX"];
+    scriptgen [label="Generate script.json + il2cpp.h              348 ms\nmethod addresses, type structures"];
+    disasm    [label="ARM64 disassembly                                8.6 s\nADRP/LDR tracking, BL/BLR call edges"];
+    signal    [label="Signal classification\ncrypto, network, obfuscation, native interop"];
+    metagen   [label="Generate unity_meta.json                       1.5 s\nsignatures, comments, call graph"];
+
+    // Outputs
+    node [width=1.8, height=0.4, fontsize=9];
+    scriptjson [label="script.json", fillcolor="#E8E4DA", color="#C4B99A"];
+    il2cpph    [label="il2cpp.h",    fillcolor="#E8E4DA", color="#C4B99A"];
+    unitymeta  [label="unity_meta.json", fillcolor="#E8E4DA", color="#C4B99A"];
+    scripts    [label="Ghidra + IDA\nscripts", fillcolor="#E8E4DA", color="#C4B99A"];
+
+    // Main flow
+    {rank=same; libil2cpp; metadata}
+    metadata  -> parse;
+    libil2cpp -> binary;
+
+    parse     -> binary    [xlabel="version"];
+    binary    -> scriptgen;
+    parse     -> scriptgen [style=invis];  // layout aid
+
+    scriptgen -> disasm;
+    disasm    -> signal;
+    signal    -> metagen;
+
+    // Decrypt branch
+    parse   -> decrypt [style=dashed, color="#C4A265", label="encrypted?"];
+    decrypt -> parse   [style=dashed, color="#C4A265", label="recovered"];
+
+    // Cross edges
+    libil2cpp -> disasm [constraint=false, style=dotted, label="code"];
+    parse     -> metagen [constraint=false, style=dotted, label="types"];
+
+    // Outputs
+    {rank=same; scriptjson; il2cpph; unitymeta; scripts}
+    scriptgen -> scriptjson;
+    scriptgen -> il2cpph;
+    scriptgen -> scripts;
+    metagen   -> unitymeta;
+}

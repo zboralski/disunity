@@ -1,0 +1,97 @@
+digraph methodology {
+    rankdir=TB;
+    bgcolor="#FAFAF8";
+    pad=0.5;
+    nodesep=0.5;
+    ranksep=0.55;
+    splines=ortho;
+
+    graph [fontname="Georgia", fontsize=11];
+    node  [fontname="Georgia", fontsize=10, shape=box, style="filled",
+           fillcolor="#FFFFFF", color="#DDDDDD", penwidth=0.8,
+           width=3.2, height=0.5, margin="0.15,0.08"];
+    edge  [fontname="Georgia", fontsize=8, color="#999999",
+           arrowsize=0.5, penwidth=0.7];
+
+    // Title
+    title [label="Elimination loop", shape=plaintext, fillcolor="transparent",
+           color="transparent", fontsize=13, fontcolor="#333333"];
+
+    // Start
+    seed [label="Working parser for one version\nv29 chosen: largest sample set",
+          fillcolor="#F0EDE6", color="#C4B99A"];
+
+    corpus [label="1,079 samples scanned\n1,067 tested for parity",
+            fillcolor="#F0EDE6", color="#C4B99A"];
+
+    // Loop
+    run [label="Run against full corpus"];
+
+    compare [label="Compare to Il2CppDumper\nmethod addresses, counts, tokens"];
+
+    classify [label="Classify failures\nparse error / wrong count / crash / timeout",
+              fillcolor="#FDF8EE", color="#C4A265", fontcolor="#8B6914"];
+
+    constraint [label="Extract constraint\nversion-specific struct layout or offset",
+                fillcolor="#FDF8EE", color="#C4A265", fontcolor="#8B6914"];
+
+    fix [label="Fix parser\nadd version branch, bounds check, or fallback"];
+
+    regress [label="Regression test\nverify no previously passing sample broke"];
+
+    // Exit
+    done [label="1,063 / 1,067 pass\n99.6% parity",
+          fillcolor="#E2EDE2", color="#8BAF8B", fontcolor="#2D5A2D"];
+
+    // Excluded
+    excluded [label="4 remaining: 2 v24 timeouts\n1 corrupt   1 encrypted (non-XOR)",
+              fillcolor="#F5F0F0", color="#C4A0A0", fontcolor="#8B4040",
+              width=3.2];
+
+    // Version distribution
+    distribution [label="Sample distribution\nv31: 813 (75%)   v29: 177 (16%)\nv27: 46 (4%)   v24: 39 (4%)\nv22: 1 (32-bit only)   encrypted: 3",
+                  fillcolor="#F0EDE6", color="#C4B99A",
+                  fontsize=8, width=3.2];
+
+    // Flow
+    title -> seed [style=invis];
+    seed -> run;
+    corpus -> run;
+    run -> compare;
+    compare -> classify;
+    classify -> constraint;
+    constraint -> fix;
+    fix -> regress;
+
+    regress -> run [xlabel="next cycle", color="#C4A265",
+                    style=dashed, penwidth=0.8];
+
+    regress -> done [xlabel="all valid\nsamples pass", color="#8BAF8B"];
+
+    // Excluded branch
+    classify -> excluded [xlabel="not fixable\nyet",
+                          style=dashed, color="#C4A0A0"];
+
+    // Distribution note
+    corpus -> distribution [style=dotted, color="#C4B99A", arrowhead=none];
+
+    // Constraint examples
+    node [shape=plaintext, fillcolor="transparent", color="transparent",
+          fontsize=8, fontcolor="#999999", width=0, height=0,
+          margin="0.04,0.02"];
+
+    a1 [label="v24 header: >= 264 not == 264\nfor sub-version detection"];
+    a2 [label="v24 RGCTX fields shift\nimages offset by 8 bytes"];
+    a3 [label="string table: clamp to EOF\nnot reject on 1-byte overrun"];
+    a4 [label="old-style CodeRegistration:\nscan for methodPointers pattern"];
+    a5 [label="BuildTypeToImageMap:\nslice not map (24x speedup)"];
+
+    constraint -> a1 [style=dotted, color="#CCCCCC", arrowhead=none];
+    a1 -> a2 [style=invis];
+    a2 -> a3 [style=invis];
+    a3 -> a4 [style=invis];
+    a4 -> a5 [style=invis];
+
+    {rank=same; constraint; a1}
+    {rank=same; seed; corpus}
+}

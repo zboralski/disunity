@@ -1,0 +1,18 @@
+# Binary
+/disunity
+
+# Go test artifacts
+*.test
+*.out
+coverage.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

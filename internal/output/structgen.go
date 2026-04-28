@@ -1096,8 +1096,14 @@ func (g *StructGenerator) generateRGCTXsStruct(sb *strings.Builder, structName s
 		}
 	}
 
-	// Fallback: generate entries based on generic type parameters only
+	// Fallback: generate entries based on generic type parameters only.
+	// Cap at a sane upper bound; corrupt or unsupported metadata can produce
+	// a garbage TypeArgc that would otherwise allocate gigabytes here.
 	paramCount := int(container.TypeArgc)
+	if paramCount < 0 || paramCount > 64 {
+		sb.WriteString("};\n")
+		return
+	}
 	for i := 0; i < paramCount; i++ {
 		paramName := "T"
 		if i > 0 {

@@ -83,6 +83,17 @@ type GlobalMetadata struct {
 
 	// Raw data for future parsing
 	rawData []byte
+
+	// resolved is true once inner structures (types, methods, images, etc.)
+	// have been parsed. For v24-v31 this is set inside Parse(). For v32+,
+	// callers must call ResolveStructs(typesCount) after locating
+	// MetadataRegistration in the binary.
+	resolved bool
+
+	// typesCount comes from MetadataRegistration.typesCount in the binary
+	// and is used to compute the on-disk width of typeIndex for v32+
+	// variable-width parsing. Set by ResolveStructs.
+	typesCount uint32
 }
 
 // Header represents the Il2CppGlobalMetadataHeader
@@ -229,6 +240,29 @@ type Header struct {
 	// Exported type definitions (v24+)
 	ExportedTypeDefinitionsOffset uint32
 	ExportedTypeDefinitionsSize   uint32
+
+	// v32+ section counts. The v39+ on-disk format encodes some fields
+	// as variable-width indexes whose width depends on the entry count
+	// of the table they reference. We store the counts here so the
+	// inner-struct parsers can compute index widths without rescanning.
+	TypeDefinitionsCount   uint32
+	GenericContainersCount uint32
+	ParametersCount        uint32
+	MethodsCount           uint32
+	ImagesCount            uint32
+
+	// v106+ adds more variable-width index types.
+	GenericParametersCount        uint32
+	InterfaceOffsetsCount         uint32
+	EventsCount                   uint32
+	PropertiesCount               uint32
+	NestedTypesCount              uint32
+	FieldsCount                   uint32
+	FieldAndParamDefaultDataCount uint32
+
+	// v106+ adds a typeInlineArrays section between typeDefinitions and images.
+	TypeInlineArraysOffset uint32
+	TypeInlineArraysSize   uint32
 
 	// Detected version for parsing (may differ from Version field)
 	// e.g., v24.2 when Version=24 but stringLiteralOffset==264
@@ -382,8 +416,8 @@ func Parse(data []byte) (*GlobalMetadata, error) {
 	}
 
 	version := int32(binary.LittleEndian.Uint32(data[4:8]))
-	if version < 24 || version > 31 {
-		return nil, fmt.Errorf("unsupported metadata version: %d (supported: 24-31)", version)
+	if version < 24 || version > 106 {
+		return nil, fmt.Errorf("unsupported metadata version: %d (supported: 24-39, 106)", version)
 	}
 
 	meta := &GlobalMetadata{
@@ -391,71 +425,128 @@ func Parse(data []byte) (*GlobalMetadata, error) {
 		rawData: data,
 	}
 
-	// Extract string tables
+	// Extract string tables. Strings are needed by both v24-v31 (parsed
+	// fully here) and v32+ (parsed in ResolveStructs after binary scan).
 	if err := meta.parseStrings(); err != nil {
 		return nil, fmt.Errorf("parse strings: %w", err)
 	}
 
-	// Parse type definitions
-	if err := meta.parseTypeDefinitions(); err != nil {
-		return nil, fmt.Errorf("parse type definitions: %w", err)
+	// v32+ uses variable-width index encoding for inner structures.
+	// The index width for typeIndex depends on MetadataRegistration's
+	// typesCount, which lives in the binary, not the metadata file.
+	// Defer inner-struct parsing until ResolveStructs is called.
+	if version >= 32 {
+		return meta, nil
 	}
 
-	// Parse method definitions
-	if err := meta.parseMethodDefinitions(); err != nil {
-		return nil, fmt.Errorf("parse method definitions: %w", err)
+	if err := meta.resolveAllStructs(); err != nil {
+		return nil, err
 	}
-
-	// Parse image definitions
-	if err := meta.parseImageDefinitions(); err != nil {
-		return nil, fmt.Errorf("parse image definitions: %w", err)
-	}
-
-	// Parse field definitions
-	if err := meta.parseFieldDefinitions(); err != nil {
-		return nil, fmt.Errorf("parse field definitions: %w", err)
-	}
-
-	// Parse parameter definitions
-	if err := meta.parseParameterDefinitions(); err != nil {
-		return nil, fmt.Errorf("parse parameter definitions: %w", err)
-	}
-
-	// Parse property definitions
-	if err := meta.parsePropertyDefinitions(); err != nil {
-		return nil, fmt.Errorf("parse property definitions: %w", err)
-	}
-
-	// Parse event definitions
-	if err := meta.parseEventDefinitions(); err != nil {
-		return nil, fmt.Errorf("parse event definitions: %w", err)
-	}
-
-	// Parse generic containers
-	if err := meta.parseGenericContainers(); err != nil {
-		return nil, fmt.Errorf("parse generic containers: %w", err)
-	}
-
-	// Parse generic parameters
-	if err := meta.parseGenericParameters(); err != nil {
-		return nil, fmt.Errorf("parse generic parameters: %w", err)
-	}
-
-	// Parse vtable method indices
-	if err := meta.parseVTableMethods(); err != nil {
-		return nil, fmt.Errorf("parse vtable methods: %w", err)
-	}
-
 	return meta, nil
+}
+
+// ResolveStructs completes parsing for v32+ metadata. typesCount is the
+// MetadataRegistration.typesCount value from the binary, used to compute
+// the width of variable-width typeIndex fields. For v24-v31 this is a
+// no-op; the structures were already parsed by Parse().
+func (m *GlobalMetadata) ResolveStructs(typesCount uint32) error {
+	if m.resolved {
+		return nil
+	}
+	if m.Header.Version < 32 {
+		// v24-v31 was already resolved in Parse; nothing to do.
+		m.resolved = true
+		return nil
+	}
+	m.typesCount = typesCount
+	return m.resolveAllStructs()
+}
+
+// TypeDefCount returns the type definition count from the header. For v32+
+// this is available before ResolveStructs is called; for v24-v31 it is
+// derived from the parsed structures or the section size.
+func (m *GlobalMetadata) TypeDefCount() int {
+	if m.Header.Version >= 32 {
+		return int(m.Header.TypeDefinitionsCount)
+	}
+	if m.TypeDefinitions != nil {
+		return len(m.TypeDefinitions)
+	}
+	return 0
+}
+
+// MethodDefCount returns the method definition count from the header.
+func (m *GlobalMetadata) MethodDefCount() int {
+	if m.Header.Version >= 32 {
+		return int(m.Header.MethodsCount)
+	}
+	if m.MethodDefinitions != nil {
+		return len(m.MethodDefinitions)
+	}
+	return 0
+}
+
+// ImageCount returns the image (assembly) count from the header.
+func (m *GlobalMetadata) ImageCount() int {
+	if m.Header.Version >= 32 {
+		return int(m.Header.ImagesCount)
+	}
+	return len(m.ImageDefinitions)
+}
+
+// resolveAllStructs parses all index-dependent structures. For v24-v31
+// this is called from Parse(). For v32+ it's called from ResolveStructs().
+func (m *GlobalMetadata) resolveAllStructs() error {
+	if err := m.parseTypeDefinitions(); err != nil {
+		return fmt.Errorf("parse type definitions: %w", err)
+	}
+	if err := m.parseMethodDefinitions(); err != nil {
+		return fmt.Errorf("parse method definitions: %w", err)
+	}
+	if err := m.parseImageDefinitions(); err != nil {
+		return fmt.Errorf("parse image definitions: %w", err)
+	}
+	if err := m.parseFieldDefinitions(); err != nil {
+		return fmt.Errorf("parse field definitions: %w", err)
+	}
+	if err := m.parseParameterDefinitions(); err != nil {
+		return fmt.Errorf("parse parameter definitions: %w", err)
+	}
+	if err := m.parsePropertyDefinitions(); err != nil {
+		return fmt.Errorf("parse property definitions: %w", err)
+	}
+	if err := m.parseEventDefinitions(); err != nil {
+		return fmt.Errorf("parse event definitions: %w", err)
+	}
+	if err := m.parseGenericContainers(); err != nil {
+		return fmt.Errorf("parse generic containers: %w", err)
+	}
+	if err := m.parseGenericParameters(); err != nil {
+		return fmt.Errorf("parse generic parameters: %w", err)
+	}
+	if err := m.parseVTableMethods(); err != nil {
+		return fmt.Errorf("parse vtable methods: %w", err)
+	}
+	m.resolved = true
+	return nil
 }
 
 // parseHeader reads the metadata header
 // Header layout varies significantly by version - see IL2CppDumper's MetadataClass.cs
+// for v24-v31, and Unity's GlobalMetadataFileInternals.h for v32+.
 func parseHeader(data []byte, version int32) *Header {
 	h := &Header{
 		Magic:           binary.LittleEndian.Uint32(data[0:4]),
 		Version:         version,
 		DetectedVersion: float64(version),
+	}
+
+	// v32+ (Unity 6.3+) introduced a new section format. Each section is now
+	// 12 bytes (offset + size + count) instead of 8 bytes (offset + size).
+	// The header is a fixed sequence of 31 sections after the 8-byte preamble.
+	if version >= 32 {
+		parseHeaderV32Plus(h, data)
+		return h
 	}
 
 	// Read initial fields to detect v24 subversions
@@ -618,6 +709,117 @@ func parseHeader(data []byte, version int32) *Header {
 	return h
 }
 
+// parseHeaderV32Plus parses the IL2CPP v32+ metadata header.
+// Each section is a triplet (offset, size, count) of 12 bytes total.
+// The 31-section sequence is defined in Unity's GlobalMetadataFileInternals.h.
+// We populate the same Header fields used for v24-v31, plus a few count
+// fields needed to compute serialized index widths for v39+.
+func parseHeaderV32Plus(h *Header, data []byte) {
+	pos := 8 // skip magic + version
+
+	// readSection reads a 12-byte (offset, size, count) triplet and advances pos.
+	// countField may be nil when the count is not needed by the parser.
+	readSection := func(offsetField, sizeField, countField *uint32) {
+		if offsetField != nil {
+			*offsetField = binary.LittleEndian.Uint32(data[pos : pos+4])
+		}
+		if sizeField != nil {
+			*sizeField = binary.LittleEndian.Uint32(data[pos+4 : pos+8])
+		}
+		if countField != nil {
+			*countField = binary.LittleEndian.Uint32(data[pos+8 : pos+12])
+		}
+		pos += 12
+	}
+
+	// Order matches Il2CppGlobalMetadataHeader in Unity source.
+	// v32 (6.3): 31 sections.
+	// v106 (6.5+): 32 sections - adds typeInlineArrays after typeDefinitions.
+	readSection(&h.StringLiteralOffset, &h.StringLiteralSize, nil)
+	readSection(&h.StringLiteralDataOffset, &h.StringLiteralDataSize, nil)
+	readSection(&h.StringOffset, &h.StringSize, nil)
+	readSection(&h.EventsOffset, &h.EventsSize, &h.EventsCount)
+	readSection(&h.PropertiesOffset, &h.PropertiesSize, &h.PropertiesCount)
+	readSection(&h.MethodsOffset, &h.MethodsSize, &h.MethodsCount)
+	readSection(&h.ParameterDefaultValuesOffset, &h.ParameterDefaultValuesSize, nil)
+	readSection(&h.FieldDefaultValuesOffset, &h.FieldDefaultValuesSize, nil)
+	readSection(&h.FieldAndParameterDefaultValueDataOffset, &h.FieldAndParameterDefaultValueDataSize, &h.FieldAndParamDefaultDataCount)
+	readSection(&h.FieldMarshaledSizesOffset, &h.FieldMarshaledSizesSize, nil)
+	readSection(&h.ParametersOffset, &h.ParametersSize, &h.ParametersCount)
+	readSection(&h.FieldsOffset, &h.FieldsSize, &h.FieldsCount)
+	readSection(&h.GenericParametersOffset, &h.GenericParametersSize, &h.GenericParametersCount)
+	readSection(&h.GenericParameterConstraintsOffset, &h.GenericParameterConstraintsSize, nil)
+	readSection(&h.GenericContainersOffset, &h.GenericContainersSize, &h.GenericContainersCount)
+	readSection(&h.NestedTypesOffset, &h.NestedTypesSize, &h.NestedTypesCount)
+	readSection(&h.InterfacesOffset, &h.InterfacesSize, nil)
+	readSection(&h.VTableMethodsOffset, &h.VTableMethodsSize, nil)
+	readSection(&h.InterfaceOffsetsOffset, &h.InterfaceOffsetsSize, &h.InterfaceOffsetsCount)
+	readSection(&h.TypeDefinitionsOffset, &h.TypeDefinitionsSize, &h.TypeDefinitionsCount)
+
+	// v106 inserts typeInlineArrays here.
+	if h.Version >= 106 {
+		readSection(&h.TypeInlineArraysOffset, &h.TypeInlineArraysSize, nil)
+	}
+
+	readSection(&h.ImagesOffset, &h.ImagesSize, &h.ImagesCount)
+	readSection(&h.AssembliesOffset, &h.AssembliesSize, nil)
+	readSection(&h.FieldRefsOffset, &h.FieldRefsSize, nil)
+	readSection(&h.ReferencedAssembliesOffset, &h.ReferencedAssembliesSize, nil)
+	readSection(&h.AttributeDataOffset, &h.AttributeDataSize, nil)
+	readSection(&h.AttributeDataRangeOffset, &h.AttributeDataRangeSize, nil)
+	readSection(&h.UnresolvedVirtualCallParameterTypesOffset, &h.UnresolvedVirtualCallParameterTypesSize, nil)
+	readSection(&h.UnresolvedVirtualCallParameterRangesOffset, &h.UnresolvedVirtualCallParameterRangesSize, nil)
+	readSection(&h.WindowsRuntimeTypeNamesOffset, &h.WindowsRuntimeTypeNamesSize, nil)
+	readSection(&h.WindowsRuntimeStringsOffset, &h.WindowsRuntimeStringsSize, nil)
+	readSection(&h.ExportedTypeDefinitionsOffset, &h.ExportedTypeDefinitionsSize, nil)
+}
+
+// indexWidth returns the serialized byte width for a v39+ variable-width
+// index. The IL2CPP runtime computes this in GetIndexSize:
+//
+//	count <= 255    -> 1 byte
+//	count <= 65535  -> 2 bytes
+//	otherwise       -> 4 bytes
+func indexWidth(count uint32) int {
+	if count <= 0xFF {
+		return 1
+	}
+	if count <= 0xFFFF {
+		return 2
+	}
+	return 4
+}
+
+// readVarIndex reads a variable-width index from data at offset off using the
+// IL2CPP serialization convention: the maximum unsigned value at that width
+// (UINT8_MAX, UINT16_MAX, UINT32_MAX) sentinels for -1; all other values are
+// the unsigned index. Width must be 1, 2, or 4.
+//
+// Reference: ReadIndex in MetadataDeserialization.h.
+func readVarIndex(data []byte, off, width int) int32 {
+	switch width {
+	case 1:
+		v := data[off]
+		if v == 0xFF {
+			return -1
+		}
+		return int32(v)
+	case 2:
+		v := binary.LittleEndian.Uint16(data[off : off+2])
+		if v == 0xFFFF {
+			return -1
+		}
+		return int32(v)
+	case 4:
+		v := binary.LittleEndian.Uint32(data[off : off+4])
+		if v == 0xFFFFFFFF {
+			return -1
+		}
+		return int32(v)
+	}
+	return 0
+}
+
 // parseStrings extracts the string tables
 func (m *GlobalMetadata) parseStrings() error {
 	h := m.Header
@@ -734,6 +936,10 @@ func (m *GlobalMetadata) parseTypeDefinitions() error {
 	h := m.Header
 	if h.TypeDefinitionsSize == 0 {
 		return nil
+	}
+
+	if h.Version >= 32 {
+		return m.parseTypeDefinitionsV32Plus()
 	}
 
 	structSize := m.detectTypeDefSize()
@@ -898,11 +1104,147 @@ func (m *GlobalMetadata) detectMethodDefSize() int {
 	return 32 // Default
 }
 
+// parseTypeDefinitionsV32Plus parses the variable-width Il2CppTypeDefinition
+// array introduced in v32 and extended in v106. On-disk layout:
+//
+//	StringIndex            nameIndex             (4)
+//	StringIndex            namespaceIndex        (4)
+//	TypeIndex              byvalTypeIndex        (varies, typeIndex)
+//	TypeIndex              declaringTypeIndex    (varies, typeIndex)
+//	TypeIndex              parentIndex           (varies, typeIndex)
+//	GenericContainerIndex  genericContainerIndex (varies)
+//	uint32                 flags                 (4)
+//	FieldIndex             fieldStart            (4 in v32-v39, varies in v106+)
+//	MethodIndex            methodStart           (4 in v32-v39, varies in v106+)
+//	EventIndex             eventStart            (4 in v32-v39, varies in v106+)
+//	PropertyIndex          propertyStart         (4 in v32-v39, varies in v106+)
+//	NestedTypeIndex        nestedTypesStart      (4 in v32-v39, varies in v106+)
+//	InterfacesIndex        interfacesStart       (4 in v32-v39, varies in v106+)
+//	VTableIndex            vtableStart           (4)
+//	InterfacesIndex        interfaceOffsetsStart (4 in v32-v39, varies in v106+)
+//	uint16 x 8             counts                (16)
+//	uint32                 bitfield              (4)
+//	uint32                 token                 (4)
+//
+// v32 dropped elementTypeIndex (which existed in v24-v31).
+func (m *GlobalMetadata) parseTypeDefinitionsV32Plus() error {
+	h := m.Header
+
+	if h.TypeDefinitionsCount == 0 || h.TypeDefinitionsSize == 0 {
+		return nil
+	}
+
+	wTypeIdx := indexWidth(m.typesCount)
+	wGenericContainer := indexWidth(h.GenericContainersCount)
+
+	// v106+ promotes several fields from fixed int32 to variable-width.
+	wField, wMethod, wEvent, wProperty, wNestedType, wInterfaces := 4, 4, 4, 4, 4, 4
+	if h.Version >= 106 {
+		wField = indexWidth(h.FieldsCount)
+		wMethod = indexWidth(h.MethodsCount)
+		wEvent = indexWidth(h.EventsCount)
+		wProperty = indexWidth(h.PropertiesCount)
+		wNestedType = indexWidth(h.NestedTypesCount)
+		wInterfaces = indexWidth(h.InterfaceOffsetsCount)
+	}
+
+	// Constant overhead: nameIdx(4) + nsIdx(4) + flags(4) + vtableStart(4) +
+	// 8*uint16(16) + bitfield(4) + token(4) = 40.
+	stride := 40 + 3*wTypeIdx + wGenericContainer +
+		wField + wMethod + wEvent + wProperty +
+		wNestedType + wInterfaces + wInterfaces
+
+	expected := int(h.TypeDefinitionsSize) / int(h.TypeDefinitionsCount)
+	if expected != stride {
+		return fmt.Errorf("v32+ type def: stride mismatch (computed=%d, on-disk=%d, typesCount=%d, ver=%d)",
+			stride, expected, m.typesCount, h.Version)
+	}
+
+	count := int(h.TypeDefinitionsCount)
+	data := m.rawData[h.TypeDefinitionsOffset:]
+	if stride*count > len(data) {
+		return fmt.Errorf("v32+ type def: table extends beyond file")
+	}
+
+	m.TypeDefinitions = make([]*TypeDefinition, count)
+
+	for i := 0; i < count; i++ {
+		off := i * stride
+
+		td := &TypeDefinition{}
+		td.NameIndex = int32(binary.LittleEndian.Uint32(data[off : off+4]))
+		off += 4
+		td.NamespaceIndex = int32(binary.LittleEndian.Uint32(data[off : off+4]))
+		off += 4
+
+		td.ByvalTypeIndex = readVarIndex(data, off, wTypeIdx)
+		off += wTypeIdx
+		td.DeclaringTypeIndex = readVarIndex(data, off, wTypeIdx)
+		off += wTypeIdx
+		td.ParentIndex = readVarIndex(data, off, wTypeIdx)
+		off += wTypeIdx
+
+		td.GenericContainerIndex = readVarIndex(data, off, wGenericContainer)
+		off += wGenericContainer
+
+		td.Flags = binary.LittleEndian.Uint32(data[off : off+4])
+		off += 4
+
+		td.FieldStart = readVarIndex(data, off, wField)
+		off += wField
+		td.MethodStart = readVarIndex(data, off, wMethod)
+		off += wMethod
+		td.EventStart = readVarIndex(data, off, wEvent)
+		off += wEvent
+		td.PropertyStart = readVarIndex(data, off, wProperty)
+		off += wProperty
+		td.NestedTypesStart = readVarIndex(data, off, wNestedType)
+		off += wNestedType
+		td.InterfacesStart = readVarIndex(data, off, wInterfaces)
+		off += wInterfaces
+		td.VtableStart = int32(binary.LittleEndian.Uint32(data[off : off+4]))
+		off += 4
+		td.InterfaceOffsetsStart = readVarIndex(data, off, wInterfaces)
+		off += wInterfaces
+
+		td.MethodCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		td.PropertyCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		td.FieldCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		td.EventCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		td.NestedTypesCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		td.VtableCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		td.InterfacesCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		td.InterfaceOffsetsCount = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+
+		td.BitField = binary.LittleEndian.Uint32(data[off : off+4])
+		off += 4
+		td.Token = binary.LittleEndian.Uint32(data[off : off+4])
+
+		m.TypeDefinitions[i] = td
+	}
+
+	return nil
+}
+
 // parseMethodDefinitions parses the method definition array
 func (m *GlobalMetadata) parseMethodDefinitions() error {
 	h := m.Header
 	if h.MethodsSize == 0 {
 		return nil
+	}
+
+	// v32+ uses variable-width index encoding. The on-disk struct size is
+	// determined by the section counts read from the header.
+	if m.Header.Version >= 32 {
+		return m.parseMethodDefinitionsV32Plus()
 	}
 
 	structSize := m.detectMethodDefSize()
@@ -946,11 +1288,111 @@ func (m *GlobalMetadata) parseMethodDefinitions() error {
 	return nil
 }
 
+// parseMethodDefinitionsV32Plus parses the variable-width Il2CppMethodDefinition
+// array introduced in IL2CPP v32 (Unity 6.3+). On-disk layout:
+//
+//	StringIndex            nameIndex             (always 4)
+//	TypeDefinitionIndex    declaringType         (varies)
+//	TypeIndex              returnType            (varies)
+//	uint32                 returnParameterToken  (always 4)
+//	ParameterIndex         parameterStart        (varies)
+//	GenericContainerIndex  genericContainerIndex (varies)
+//	uint32                 token                 (always 4)
+//	uint16                 flags                 (always 2)
+//	uint16                 iflags                (always 2)
+//	uint16                 slot                  (always 2)
+//	uint16                 parameterCount        (always 2)
+//
+// All variable-width index sizes are computed from the section counts in
+// the header except typeIndex, which depends on
+// MetadataRegistration.typesCount (set via ResolveStructs).
+func (m *GlobalMetadata) parseMethodDefinitionsV32Plus() error {
+	h := m.Header
+
+	if h.MethodsCount == 0 || h.MethodsSize == 0 {
+		return nil
+	}
+
+	wTypeDef := indexWidth(h.TypeDefinitionsCount)
+	wTypeIdx := indexWidth(m.typesCount)
+	wParam := indexWidth(h.ParametersCount)
+	wGenericContainer := indexWidth(h.GenericContainersCount)
+
+	// Per-entry stride: nameIndex(4) + declaringType + returnType +
+	// returnParameterToken(4) + parameterStart + genericContainerIndex +
+	// token(4) + flags(2) + iflags(2) + slot(2) + parameterCount(2).
+	stride := 4 + wTypeDef + wTypeIdx + 4 + wParam + wGenericContainer + 4 + 2*4
+
+	expected := int(h.MethodsSize) / int(h.MethodsCount)
+	if expected != stride {
+		return fmt.Errorf("v32+ method def: stride mismatch (computed=%d, on-disk=%d, typesCount=%d)",
+			stride, expected, m.typesCount)
+	}
+
+	count := int(h.MethodsCount)
+	data := m.rawData[h.MethodsOffset:]
+	if stride*count > len(data) {
+		return fmt.Errorf("v32+ method def: table extends beyond file")
+	}
+
+	m.MethodDefinitions = make([]*MethodDefinition, count)
+
+	for i := 0; i < count; i++ {
+		off := i * stride
+
+		md := &MethodDefinition{}
+
+		// nameIndex: always 4 bytes
+		md.NameIndex = int32(binary.LittleEndian.Uint32(data[off : off+4]))
+		off += 4
+
+		// declaringType: variable width
+		md.DeclaringTypeIndex = readVarIndex(data, off, wTypeDef)
+		off += wTypeDef
+
+		// returnType: variable width (typeIndex)
+		md.ReturnTypeIndex = readVarIndex(data, off, wTypeIdx)
+		off += wTypeIdx
+
+		// returnParameterToken: 4 bytes (skipped, not stored)
+		off += 4
+
+		// parameterStart: variable width
+		md.ParameterStart = readVarIndex(data, off, wParam)
+		off += wParam
+
+		// genericContainerIndex: variable width
+		md.GenericContainerIndex = readVarIndex(data, off, wGenericContainer)
+		off += wGenericContainer
+
+		// token: 4 bytes
+		md.Token = binary.LittleEndian.Uint32(data[off : off+4])
+		off += 4
+
+		md.Flags = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		md.IFlags = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		md.Slot = binary.LittleEndian.Uint16(data[off : off+2])
+		off += 2
+		md.ParameterCount = binary.LittleEndian.Uint16(data[off : off+2])
+
+		m.MethodDefinitions[i] = md
+	}
+
+	return nil
+}
+
 // parseImageDefinitions parses the image (assembly) definitions
 func (m *GlobalMetadata) parseImageDefinitions() error {
 	h := m.Header
 	if h.ImagesSize == 0 {
 		return nil
+	}
+
+	// v32+ uses variable-width index encoding for some image fields.
+	if h.Version >= 32 {
+		return m.parseImageDefinitionsV32Plus()
 	}
 
 	// Image definition size varies by version:
@@ -1025,6 +1467,88 @@ func (m *GlobalMetadata) parseImageDefinitions() error {
 
 	if len(images) == 0 {
 		return fmt.Errorf("no valid image definitions found (raw count=%d, size=%d, total=%d)", count, structSize, h.ImagesSize)
+	}
+
+	m.ImageDefinitions = images
+	return nil
+}
+
+// parseImageDefinitionsV32Plus parses Il2CppImageDefinition for v32+ where
+// typeStart and exportedTypeStart are variable-width (typeDefinitionIndex).
+// v106+ also makes entryPointIndex variable-width (methodIndex).
+// On-disk layout:
+//
+//	StringIndex            nameIndex            (4)
+//	AssemblyIndex          assemblyIndex        (4)
+//	TypeDefinitionIndex    typeStart            (varies)
+//	uint32                 typeCount            (4)
+//	TypeDefinitionIndex    exportedTypeStart    (varies)
+//	uint32                 exportedTypeCount    (4)
+//	MethodIndex            entryPointIndex      (4 in v32-v39, varies in v106+)
+//	uint32                 token                (4)
+//	CustomAttributeIndex   customAttributeStart (4)
+//	uint32                 customAttributeCount (4)
+func (m *GlobalMetadata) parseImageDefinitionsV32Plus() error {
+	h := m.Header
+	wTypeDef := indexWidth(h.TypeDefinitionsCount)
+	wEntryPoint := 4
+	if h.Version >= 106 {
+		wEntryPoint = indexWidth(h.MethodsCount)
+	}
+
+	// Constant overhead: name(4)+assembly(4)+typeCount(4)+exportedTypeCount(4)+
+	// token(4)+customAttrStart(4)+customAttrCount(4) = 28
+	stride := 28 + 2*wTypeDef + wEntryPoint
+
+	count := int(h.ImagesSize) / stride
+	if count <= 0 {
+		return fmt.Errorf("v32+ image: invalid count (size=%d, stride=%d)", h.ImagesSize, stride)
+	}
+
+	data := m.rawData[h.ImagesOffset:]
+	if stride*count > len(data) {
+		return fmt.Errorf("v32+ image: table extends beyond file")
+	}
+
+	images := make([]*ImageDefinition, 0, count)
+
+	for i := 0; i < count; i++ {
+		off := i * stride
+
+		nameIdx := int32(binary.LittleEndian.Uint32(data[off : off+4]))
+		if nameIdx < 0 || int(nameIdx) >= len(m.Strings) {
+			break
+		}
+
+		img := &ImageDefinition{NameIndex: nameIdx}
+		off += 4
+
+		img.AssemblyIndex = int32(binary.LittleEndian.Uint32(data[off : off+4]))
+		off += 4
+
+		img.TypeStart = readVarIndex(data, off, wTypeDef)
+		off += wTypeDef
+		img.TypeCount = binary.LittleEndian.Uint32(data[off : off+4])
+		off += 4
+
+		img.ExportedTypeStart = readVarIndex(data, off, wTypeDef)
+		off += wTypeDef
+		img.ExportedTypeCount = binary.LittleEndian.Uint32(data[off : off+4])
+		off += 4
+
+		img.EntryPointIndex = readVarIndex(data, off, wEntryPoint)
+		off += wEntryPoint
+		img.Token = binary.LittleEndian.Uint32(data[off : off+4])
+		off += 4
+		img.CustomAttributeStart = int32(binary.LittleEndian.Uint32(data[off : off+4]))
+		off += 4
+		img.CustomAttributeCount = binary.LittleEndian.Uint32(data[off : off+4])
+
+		images = append(images, img)
+	}
+
+	if len(images) == 0 {
+		return fmt.Errorf("v32+ image: no valid entries")
 	}
 
 	m.ImageDefinitions = images
@@ -1348,7 +1872,17 @@ func (m *GlobalMetadata) parseGenericContainers() error {
 		return nil
 	}
 
-	// Generic container size: 16 bytes
+	// v106+ uses a packed on-disk layout:
+	//   ownerIndex            int32  (4)
+	//   type_argc             uint16 (2)
+	//   is_method             uint8  (1)
+	//   genericParameterStart varies (1, 2, or 4)
+	// v32-v39 still use the legacy 4 x int32 = 16 byte layout.
+	if h.Version >= 106 {
+		return m.parseGenericContainersV32Plus()
+	}
+
+	// v24-v39: 4 x int32 = 16 bytes.
 	structSize := 16
 	count := int(h.GenericContainersSize) / structSize
 	if count <= 0 || count > 100000 {
@@ -1369,6 +1903,47 @@ func (m *GlobalMetadata) parseGenericContainers() error {
 			TypeArgc:              int32(binary.LittleEndian.Uint32(data[offset+4 : offset+8])),
 			IsMethod:              int32(binary.LittleEndian.Uint32(data[offset+8 : offset+12])),
 			GenericParameterStart: int32(binary.LittleEndian.Uint32(data[offset+12 : offset+16])),
+		}
+		m.GenericContainers[i] = gc
+	}
+
+	return nil
+}
+
+// parseGenericContainersV32Plus parses Il2CppGenericContainer for v32+ where
+// the on-disk format is packed: int32 + uint16 + uint8 + variable-width
+// genericParameterStart.
+func (m *GlobalMetadata) parseGenericContainersV32Plus() error {
+	h := m.Header
+	if h.GenericContainersSize == 0 || h.GenericContainersCount == 0 {
+		return nil
+	}
+
+	wParam := indexWidth(h.GenericParametersCount)
+	stride := 4 + 2 + 1 + wParam // ownerIndex + type_argc + is_method + paramStart
+
+	expected := int(h.GenericContainersSize) / int(h.GenericContainersCount)
+	if expected != stride {
+		return fmt.Errorf("v32+ generic container: stride mismatch (computed=%d, on-disk=%d, paramCount=%d, ver=%d)",
+			stride, expected, h.GenericParametersCount, h.Version)
+	}
+
+	count := int(h.GenericContainersCount)
+	data := m.rawData[h.GenericContainersOffset:]
+	if stride*count > len(data) {
+		return fmt.Errorf("v32+ generic container: table extends beyond file")
+	}
+
+	m.GenericContainers = make([]*GenericContainer, count)
+
+	for i := 0; i < count; i++ {
+		off := i * stride
+
+		gc := &GenericContainer{
+			OwnerIndex:            int32(binary.LittleEndian.Uint32(data[off : off+4])),
+			TypeArgc:              int32(binary.LittleEndian.Uint16(data[off+4 : off+6])),
+			IsMethod:              int32(data[off+6]),
+			GenericParameterStart: readVarIndex(data, off+7, wParam),
 		}
 		m.GenericContainers[i] = gc
 	}

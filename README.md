@@ -17,11 +17,11 @@ This is a proof of concept. It works well on the samples we have tested, but cov
 ## Scope
 
 - ARM64 ELF (Android Unity apps)
-- IL2CPP metadata versions 24, 27, 29, 31
+- IL2CPP metadata versions 24, 27, 29, 31, 39 (Unity 6.3 LTS, 6.4), 106 (Unity 6.5 beta, 6.6 alpha)
 - Unity 2017.1 through Unity 6000.x
 - pure static analysis
 
-Versions beyond 31 (v35, v38, v39 in newer Unity builds) are not yet supported. Contributions of test samples for these versions are welcome.
+v39 (Unity 6.3-6.4) and v106 (Unity 6.5+) are supported. Contributions of test samples for any other versions are welcome.
 
 ## Why build this
 
@@ -203,7 +203,9 @@ The 4 failures:
 - 1 corrupt metadata (string offsets in the billions, Il2CppDumper also fails)
 - 1 encrypted metadata (non-XOR scheme, neither tool decrypts it)
 
-IL2CPP metadata versions 25, 26, 28, and 30 do not exist. The version numbers jump 24 to 27 to 29 to 31.
+IL2CPP metadata versions 25, 26, 28, 30, 32-38, 40-105 are not used by Unity. The version numbers jump 24 to 27 to 29 to 31 to 39 to 106.
+
+v39 (Unity 6.3 LTS and 6.4) introduced a new on-disk format with variable-width index encoding for some fields. v106 (Unity 6.5 beta and 6.6 alpha at time of writing) adds a typeInlineArrays section and extends variable-width encoding to many more index types. disunity supports both; Il2CppDumper rejects v39 and v106 with `Metadata file supplied is not a supported version[N]`.
 
 The wider sample corpus (1,079 metadata files from production Android apps) shows a strong clustering toward recent Unity versions:
 
@@ -218,7 +220,7 @@ The wider sample corpus (1,079 metadata files from production Android apps) show
 
 Most apps in the wild use v29 or v31. Older versions are increasingly rare. v22 (Unity 5.5.x) exists but is not currently supported.
 
-Versions beyond 31 (v35, v38, v39) have been observed in newer Unity builds but are not yet represented in our test corpus.
+Versions beyond 106 are not yet observed in shipping Unity builds.
 
 ## Methodology
 

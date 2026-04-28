@@ -26,12 +26,20 @@ type IL2CPPStaticAnalyzer struct {
 	imageCount int
 	typeDefinitionsCount int // From metadata, used for MetadataRegistration search
 	methodCount int // From metadata, used for old-style CodeRegistration search
+	typesCount uint32 // Read from MetadataRegistration; needed for v32+ variable-width index decoding
 	log        func(string, ...any) (int, error) // diagnostic logging
 
 	// Sections for searching
 	execSections []SearchSection
 	dataSections []SearchSection
 	bssSections  []SearchSection
+}
+
+// TypesCount returns Il2CppMetadataRegistration.typesCount, populated as a
+// side effect of FindMetadataRegistration. Returns 0 if MetadataRegistration
+// has not been located yet.
+func (a *IL2CPPStaticAnalyzer) TypesCount() uint32 {
+	return a.typesCount
 }
 
 // CodeGenModuleStatic represents a statically extracted CodeGenModule
@@ -1267,6 +1275,7 @@ func (a *IL2CPPStaticAnalyzer) FindMetadataRegistration() (uint64, error) {
 			a.log("[il2cpp static] MetadataRegistration candidate: gcCount=%d, gmtCount=%d, typesCount=%d\n",
 				gcCount, gmtCount, typesCount)
 
+			a.typesCount = uint32(typesCount)
 			return metaRegVA, nil
 		}
 	}

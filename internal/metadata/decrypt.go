@@ -90,7 +90,7 @@ func FindXORKeyWithValidation(binaryPath string, metaData []byte) (*XORKey, []by
 		if magic != MetadataMagic {
 			continue
 		}
-		if version < 24 || version > 31 {
+		if version < 24 || version > 106 {
 			continue
 		}
 		if stringOffset == 0 || uint64(stringOffset)+uint64(stringSize) > uint64(len(decrypted)) {
@@ -793,7 +793,7 @@ func quickValidateHeader(data []byte) bool {
 	if magic != MetadataMagic {
 		return false
 	}
-	if version < 24 || version > 31 {
+	if version < 24 || version > 106 {
 		return false
 	}
 	// String offset should be reasonable (header size to ~10MB)
@@ -985,7 +985,7 @@ func validateDecrypted(data []byte) bool {
 	if magic != MetadataMagic {
 		return false
 	}
-	if version < 24 || version > 31 {
+	if version < 24 || version > 106 {
 		return false
 	}
 	if stringOffset == 0 || uint64(stringOffset)+uint64(stringSize) > uint64(len(data)) {

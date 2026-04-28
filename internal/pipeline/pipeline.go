@@ -2,6 +2,7 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -74,14 +75,18 @@ func Run(opts Opts) (*Result, error) {
 
 	meta, err := metadata.ParseFile(opts.MetaPath)
 	if err != nil {
-		// Only attempt auto-decryption for encrypted metadata or structural
-		// parse failures (wrong image count, etc.). Skip for truncated files
-		// where the error is about tables extending beyond EOF - those are
-		// corrupt, not encrypted, and Kasiski will hang on large files.
+		// Only attempt auto-decryption when the failure is consistent with
+		// encrypted metadata: invalid magic. Other failures (truncation,
+		// unsupported version, structural errors on a sample with valid magic)
+		// are not decryption candidates. The Kasiski search is O(N) over
+		// large files and must not run on real-but-unsupported metadata.
 		errStr := err.Error()
-		truncated := strings.Contains(errStr, "beyond file") ||
-			strings.Contains(errStr, "too small")
-		if !truncated {
+		_, encrypted := errors.Unwrap(err).(*metadata.EncryptedMetadataError)
+		if !encrypted {
+			// Fallback: some encrypted-magic errors come back as wrapped strings
+			encrypted = strings.Contains(errStr, "metadata is encrypted")
+		}
+		if encrypted {
 			opts.log("  parse failed: %v\n", err)
 			opts.log("  attempting auto-decrypt...\n")
 			decrypted, key, decErr := metadata.TryAutoDecrypt(opts.LibPath, opts.MetaPath)
@@ -102,20 +107,21 @@ func Run(opts Opts) (*Result, error) {
 	}
 
 	result.IL2CPPVersion = float64(meta.Header.Version)
-	allMethods := meta.GetAllMethods()
 	opts.log("  version: %d\n", meta.Header.Version)
 	opts.log("  types: %d  methods: %d  images: %d\n",
-		len(meta.TypeDefinitions), len(meta.MethodDefinitions), len(meta.ImageDefinitions))
+		meta.TypeDefCount(), meta.MethodDefCount(), meta.ImageCount())
 	opts.log("  parsed in %v\n", time.Since(t0).Round(time.Millisecond))
 
 	// Stage 2: Scan libil2cpp.so
 	opts.log("\nbinary %s\n", filepath.Base(opts.LibPath))
 	t1 := time.Now()
 
+	// Use header counts so v32+ (which defers struct parsing) still feeds
+	// the analyzer the right search heuristics.
 	analyzer, err := binary.NewIL2CPPStaticAnalyzer(
 		opts.LibPath, float64(meta.Header.Version),
-		len(meta.ImageDefinitions), len(meta.TypeDefinitions),
-		len(meta.MethodDefinitions),
+		meta.ImageCount(), meta.TypeDefCount(),
+		meta.MethodDefCount(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("open binary: %w", err)
@@ -177,6 +183,13 @@ func Run(opts Opts) (*Result, error) {
 	} else if !isOldStyle {
 		opts.log("  MetadataRegistration: 0x%X\n", metaRegVA)
 	}
+
+	// v32+ deferred parsing: now that we have typesCount from
+	// MetadataRegistration, resolve the index-dependent structures.
+	if err := meta.ResolveStructs(analyzer.TypesCount()); err != nil {
+		return nil, fmt.Errorf("resolve metadata structs: %w", err)
+	}
+	allMethods := meta.GetAllMethods()
 
 	// Read types from MetadataRegistration
 	var il2cppTypes []*binary.Il2CppType
